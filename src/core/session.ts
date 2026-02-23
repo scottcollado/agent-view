@@ -12,7 +12,7 @@ import { randomUUID } from "crypto"
 import path from "path"
 import fs from "fs"
 import os from "os"
-import { getClaudeSessionID, buildForkCommand, canFork, buildClaudeCommand, copySessionToProject } from "./claude"
+import { buildForkCommand, buildClaudeCommand, copySessionToProject, sessionFileExists } from "./claude"
 
 const logFile = path.join(os.homedir(), ".agent-orchestrator", "debug.log")
 function log(...args: unknown[]) {
@@ -202,37 +202,45 @@ export class SessionManager {
   }
 
   /**
-   * Resolve the Claude session ID for a session.
+   * Get the Claude session ID for a session.
    *
-   * Resolution order (most reliable first):
-   * 1. From session's toolData.claudeSessionId (pre-assigned on creation)
-   * 2. From tmux environment CLAUDE_SESSION_ID
-   * 3. From file system detection (WARNING: returns most recent, may be wrong session)
+   * The session must have claudeSessionId stored in toolData (set on creation).
+   * Falls back to tmux environment for sessions created during migration period.
+   * Also verifies the session file actually exists in Claude's config.
    *
-   * @returns The Claude session ID or null if not found
+   * @returns The Claude session ID or null if not found or file doesn't exist
    */
-  private async resolveClaudeSessionId(session: Session): Promise<string | null> {
-    // 1. Check toolData (most reliable - we assigned this ID)
+  private async getClaudeSessionId(session: Session): Promise<string | null> {
+    let claudeSessionId: string | null = null
+
+    // Primary: Check toolData (set when session was created)
     if (session.toolData?.claudeSessionId && typeof session.toolData.claudeSessionId === "string") {
-      log("Resolved Claude session ID from toolData:", session.toolData.claudeSessionId)
-      return session.toolData.claudeSessionId
+      claudeSessionId = session.toolData.claudeSessionId
+      log("Got Claude session ID from toolData:", claudeSessionId)
     }
 
-    // 2. Check tmux environment (reliable if session set it)
-    const tmuxEnvId = await tmux.getSessionEnvironment(session.tmuxSession, "CLAUDE_SESSION_ID")
-    if (tmuxEnvId) {
-      log("Resolved Claude session ID from tmux environment:", tmuxEnvId)
-      return tmuxEnvId
+    // Fallback: Check tmux environment (for sessions created during migration)
+    if (!claudeSessionId) {
+      const tmuxEnvId = await tmux.getSessionEnvironment(session.tmuxSession, "CLAUDE_SESSION_ID")
+      if (tmuxEnvId) {
+        claudeSessionId = tmuxEnvId
+        log("Got Claude session ID from tmux environment:", claudeSessionId)
+      }
     }
 
-    // 3. Fall back to file system detection (least reliable)
-    // WARNING: This returns the most recently modified session, which may not
-    // be the session you want when multiple sessions exist for the same project.
-    const fileSystemId = getClaudeSessionID(session.projectPath)
-    if (fileSystemId) {
-      log("Resolved Claude session ID from file system (fallback):", fileSystemId)
+    if (!claudeSessionId) {
+      log("No Claude session ID found - session may be too old")
+      return null
     }
-    return fileSystemId
+
+    // Verify the session file actually exists
+    // This prevents fork errors when we stored an ID but Claude never created the file
+    if (!sessionFileExists(session.projectPath, claudeSessionId)) {
+      log("Claude session file does not exist:", claudeSessionId)
+      return null
+    }
+
+    return claudeSessionId
   }
 
   /**
@@ -292,13 +300,13 @@ export class SessionManager {
   ): Promise<Session> {
     log("Forking Claude session")
 
-    // Step 1: Resolve the parent Claude session ID
-    const parentClaudeSessionId = await this.resolveClaudeSessionId(source)
+    // Step 1: Get the parent Claude session ID
+    const parentClaudeSessionId = await this.getClaudeSessionId(source)
     if (!parentClaudeSessionId) {
       log("No Claude session ID found")
       throw new Error(
-        "Cannot fork: no active Claude session detected. " +
-        "Session must be running with an active conversation."
+        "Cannot fork: no conversation found in this session. " +
+        "Make sure you've had at least one exchange with Claude before forking."
       )
     }
 
@@ -356,14 +364,16 @@ export class SessionManager {
   }
 
   /**
-   * Check if a session can be forked (has an active Claude session)
+   * Check if a session can be forked (has a tracked Claude session ID)
    */
   async canFork(sessionId: string): Promise<boolean> {
     const session = getStorage().getSession(sessionId)
     if (!session) return false
     if (session.tool !== "claude") return false
 
-    return await canFork(session.projectPath)
+    // Check if session has a stored Claude session ID
+    const claudeSessionId = await this.getClaudeSessionId(session)
+    return claudeSessionId !== null
   }
 
   async delete(sessionId: string, options?: { deleteWorktree?: boolean }): Promise<void> {

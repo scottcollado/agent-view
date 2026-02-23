@@ -9,6 +9,8 @@ import {
   getSessionFilePath,
   sessionFileExists,
   copySessionToProject,
+  sessionHasConversationData,
+  findAnySessionID,
   type ForkCommandOptions
 } from "./claude"
 import type { ClaudeOptions } from "./types"
@@ -253,5 +255,27 @@ describe("sessionFileExists", () => {
   test("returns false for non-existent session", () => {
     const result = sessionFileExists("/nonexistent/path", "fake-session-id")
     expect(result).toBe(false)
+  })
+})
+
+// =============================================================================
+// Session Conversation Data Tests
+// =============================================================================
+
+describe("sessionHasConversationData", () => {
+  test("returns false for non-existent session", () => {
+    const result = sessionHasConversationData("/nonexistent/path", "fake-session-id")
+    expect(result).toBe(false)
+  })
+})
+
+// =============================================================================
+// Find Any Session Tests
+// =============================================================================
+
+describe("findAnySessionID", () => {
+  test("returns null for non-existent project path", () => {
+    const result = findAnySessionID("/nonexistent/path/that/does/not/exist")
+    expect(result).toBe(null)
   })
 })

@@ -13,7 +13,6 @@ import { DialogHeader } from "@tui/ui/dialog-header"
 import { DialogFooter } from "@tui/ui/dialog-footer"
 import { ActionButton } from "@tui/ui/action-button"
 import { isGitRepo, getRepoRoot, createWorktree, generateBranchName, sanitizeBranchName } from "@/core/git"
-import { canFork } from "@/core/claude"
 import type { Session } from "@/core/types"
 
 type FocusField = "title" | "worktree" | "branch"
@@ -62,11 +61,11 @@ export function DialogFork(props: DialogForkProps) {
     }
   })
 
-  // Check fork eligibility (active Claude session required)
+  // Check fork eligibility (session must have tracked Claude session ID)
   createEffect(async () => {
     setCheckingForkEligibility(true)
     try {
-      const result = await canFork(props.session.projectPath)
+      const result = await sync.session.canFork(props.session.id)
       setCanForkSession(result)
     } catch {
       setCanForkSession(false)
@@ -238,7 +237,7 @@ export function DialogFork(props: DialogForkProps) {
       <Show when={!checkingForkEligibility() && !canForkSession()}>
         <box paddingLeft={4} paddingRight={4} paddingTop={1}>
           <text fg={theme.error}>
-            No active Claude session detected. The session must be running with an active conversation to fork.
+            Cannot fork: no conversation found. Make sure you've had at least one exchange with Claude in this session.
           </text>
         </box>
       </Show>

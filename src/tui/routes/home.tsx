@@ -23,7 +23,6 @@ import { useKeybind } from "@tui/context/keybind"
 import { useKV } from "@tui/context/kv"
 import { DialogUpdate } from "@tui/component/dialog-update"
 import { attachSessionSync, capturePane, wasCommandPaletteRequested } from "@/core/tmux"
-import { canFork } from "@/core/claude"
 import { useCommandDialog } from "@tui/component/dialog-command"
 import type { Session, Group } from "@/core/types"
 import { formatRelativeTime, formatSmartTime, truncatePath } from "@tui/util/locale"
@@ -326,14 +325,14 @@ export function Home() {
       return
     }
 
-    log("Checking canFork for projectPath:", session.projectPath)
-    const canForkSession = await canFork(session.projectPath)
+    log("Checking canFork for session:", session.id)
+    const canForkSession = await sync.session.canFork(session.id)
     log("canFork result:", canForkSession)
 
     if (!canForkSession) {
-      log("Fork rejected: no active Claude session")
+      log("Fork rejected: no conversation found")
       toast.show({
-        message: "Cannot fork: no active Claude session detected (session must be running)",
+        message: "Cannot fork: no conversation found. Have at least one exchange with Claude first.",
         variant: "error",
         duration: 3000
       })

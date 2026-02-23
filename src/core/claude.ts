@@ -83,13 +83,29 @@ function isUuidSessionFile(filename: string): boolean {
  * you want. Prefer using stored session IDs from toolData when available.
  */
 function findActiveSessionID(configDir: string): string | null {
+  return findSessionID(configDir, { activeOnly: true })
+}
+
+/**
+ * Find session files in a directory.
+ *
+ * @param configDir - The Claude project config directory
+ * @param options.activeOnly - If true, only return sessions modified within 5 minutes
+ * @returns The most recent session ID or null
+ */
+function findSessionID(
+  configDir: string,
+  options: { activeOnly?: boolean } = {}
+): string | null {
   if (!existsSync(configDir)) {
     return null
   }
 
   try {
     const files = readdirSync(configDir)
-    const cutoffTime = Date.now() - ACTIVE_SESSION_WINDOW_MS
+    const cutoffTime = options.activeOnly
+      ? Date.now() - ACTIVE_SESSION_WINDOW_MS
+      : 0
 
     let mostRecent: { sessionId: string; mtime: number } | null = null
 
@@ -100,7 +116,9 @@ function findActiveSessionID(configDir: string): string | null {
       try {
         const stats = statSync(filePath)
         const mtime = stats.mtimeMs
-        if (mtime < cutoffTime) continue
+
+        // Skip if activeOnly and file is too old
+        if (options.activeOnly && mtime < cutoffTime) continue
 
         if (!mostRecent || mtime > mostRecent.mtime) {
           mostRecent = {
@@ -117,6 +135,53 @@ function findActiveSessionID(configDir: string): string | null {
   } catch {
     return null
   }
+}
+
+/**
+ * Check if a session file contains actual conversation data.
+ * This helps distinguish real sessions from "zombie" sessions
+ * (e.g., Claude crashed on startup before creating conversation).
+ *
+ * Based on agent-deck's sessionHasConversationData() approach.
+ */
+export function sessionHasConversationData(
+  projectPath: string,
+  sessionId: string
+): boolean {
+  const sessionFile = getSessionFilePath(projectPath, sessionId)
+
+  if (!existsSync(sessionFile)) {
+    return false
+  }
+
+  try {
+    const content = readFileSync(sessionFile, "utf-8")
+    // Check if file has actual conversation - look for "sessionId" field
+    // which indicates Claude wrote conversation data
+    return content.includes('"sessionId"')
+  } catch {
+    return false
+  }
+}
+
+/**
+ * Find any session ID for a project (no time restriction).
+ * Validates that the session has actual conversation data.
+ *
+ * Use this for forking old sessions that may not be "active".
+ */
+export function findAnySessionID(projectPath: string): string | null {
+  const configDir = getClaudeConfigDir()
+  const projectDirName = convertToClaudeDirName(projectPath)
+  const projectConfigDir = path.join(configDir, "projects", projectDirName)
+
+  const sessionId = findSessionID(projectConfigDir, { activeOnly: false })
+
+  if (sessionId && sessionHasConversationData(projectPath, sessionId)) {
+    return sessionId
+  }
+
+  return null
 }
 
 /**
