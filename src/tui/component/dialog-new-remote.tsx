@@ -42,6 +42,52 @@ export function DialogNewRemote() {
   const [title, setTitle] = createSignal("")
   const [creating, setCreating] = createSignal(false)
 
+  async function doCreate(runner: SSHRunner, hostVal: string, pathVal: string) {
+    const result = await runner.create({
+      title: title().trim() || undefined,
+      projectPath: pathVal,
+      tool: selectedTool(),
+      command: selectedTool() === "custom" ? customCommand() : undefined,
+    })
+
+    if (result.success) {
+      // Save last used values
+      await saveLastRemoteSession({
+        host: hostVal,
+        avPath: avPath() || "av",
+        tool: selectedTool(),
+        projectPath: pathVal,
+      })
+
+      // Save to recents
+      const sessionName = title().trim() || pathVal.split("/").pop() || "remote"
+      const newRecent: Recent = {
+        name: sessionName,
+        projectPath: pathVal,
+        tool: selectedTool(),
+        remoteHost: hostVal,
+        remoteAvPath: avPath() || "av",
+        command: selectedTool() === "custom" ? customCommand() : undefined,
+      }
+      const config = await loadConfig()
+      const updatedRecents = addRecent(getRecents(), newRecent)
+      await saveConfig({ ...config, recents: updatedRecents })
+
+      toast.show({
+        message: `Created session on ${hostVal}`,
+        variant: "success",
+        duration: 2000
+      })
+      dialog.clear()
+    } else {
+      toast.show({
+        message: result.error || "Failed to create session",
+        variant: "error",
+        duration: 3000
+      })
+    }
+  }
+
   async function handleCreate() {
     if (creating()) return
 
@@ -61,54 +107,86 @@ export function DialogNewRemote() {
 
     try {
       const runner = new SSHRunner("remote", hostVal, avPath() || "av")
-      const result = await runner.create({
-        title: title().trim() || undefined,
-        projectPath: pathVal,
-        tool: selectedTool(),
-        command: selectedTool() === "custom" ? customCommand() : undefined,
-      })
 
-      if (result.success) {
-        // Save last used values
-        await saveLastRemoteSession({
-          host: hostVal,
-          avPath: avPath() || "av",
-          tool: selectedTool(),
-          projectPath: pathVal,
-        })
+      // Check if av is available on remote
+      const avCheck = await runner.checkAvailable()
+      if (!avCheck.ok) {
+        // av not found - prompt to install
+        setCreating(false)
+        showInstallPrompt(runner, hostVal, pathVal)
+        return
+      }
 
-        // Save to recents
-        const sessionName = title().trim() || pathVal.split("/").pop() || "remote"
-        const newRecent: Recent = {
-          name: sessionName,
-          projectPath: pathVal,
-          tool: selectedTool(),
-          remoteHost: hostVal,
-          remoteAvPath: avPath() || "av",
-          command: selectedTool() === "custom" ? customCommand() : undefined,
-        }
-        const config = await loadConfig()
-        const updatedRecents = addRecent(getRecents(), newRecent)
-        await saveConfig({ ...config, recents: updatedRecents })
-
-        toast.show({
-          message: `Created session on ${hostVal}`,
-          variant: "success",
-          duration: 2000
-        })
-        dialog.clear()
+      // If av was found at a different path than configured, use that path
+      if (avCheck.path && avCheck.path !== avPath()) {
+        setAvPath(avCheck.path)
+        const newRunner = new SSHRunner("remote", hostVal, avCheck.path)
+        await doCreate(newRunner, hostVal, pathVal)
       } else {
-        toast.show({
-          message: result.error || "Failed to create session",
-          variant: "error",
-          duration: 3000
-        })
+        await doCreate(runner, hostVal, pathVal)
       }
     } catch (err) {
       toast.error(err as Error)
     } finally {
       setCreating(false)
     }
+  }
+
+  // Show prompt to install av on remote
+  function showInstallPrompt(runner: SSHRunner, hostVal: string, pathVal: string) {
+    dialog.replace(() => (
+      <DialogSelect
+        title={`av not found on ${hostVal}`}
+        options={[
+          { title: "Install av on remote", value: "install" },
+          { title: "Cancel", value: "cancel" },
+        ]}
+        onSelect={async (opt) => {
+          if (opt.value === "cancel") {
+            dialog.clear()
+            return
+          }
+
+          // Show installing status
+          dialog.replace(() => (
+            <box gap={1} paddingBottom={1}>
+              <DialogHeader title={`Installing av on ${hostVal}...`} />
+              <box paddingLeft={4} paddingRight={4} paddingTop={1}>
+                <text>This may take a minute...</text>
+              </box>
+            </box>
+          ))
+
+          const installResult = await runner.installAv()
+          if (installResult.success) {
+            toast.show({ message: "av installed successfully", variant: "success", duration: 2000 })
+
+            // Update avPath to use full path (shell PATH may not be set in non-interactive mode)
+            const fullAvPath = "~/.agent-view/bin/av"
+            setAvPath(fullAvPath)
+            const newRunner = new SSHRunner("remote", hostVal, fullAvPath)
+
+            // Now create the session
+            setCreating(true)
+            try {
+              await doCreate(newRunner, hostVal, pathVal)
+            } catch (err) {
+              toast.error(err as Error)
+            } finally {
+              setCreating(false)
+            }
+          } else {
+            toast.show({
+              message: `Failed to install av: ${installResult.error}`,
+              variant: "error",
+              duration: 5000
+            })
+            dialog.clear()
+          }
+        }}
+      />
+    ))
+    dialog.setSize("large")
   }
 
   // Step 1: Enter host

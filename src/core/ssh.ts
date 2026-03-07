@@ -272,14 +272,69 @@ export class SSHRunner {
 
   /**
    * Check if av is available on the remote host
+   * Checks configured path first, then default install location
    */
-  async checkAvailable(): Promise<{ ok: boolean; version?: string; error?: string }> {
+  async checkAvailable(): Promise<{ ok: boolean; version?: string; path?: string; error?: string }> {
+    // First try the configured avPath
     try {
       const output = await this.run(["-v"])
       const version = output.trim()
-      return { ok: true, version }
+      return { ok: true, version, path: this.avPath }
+    } catch {
+      // Configured path failed, try default install location
+    }
+
+    // Try default install path
+    const defaultPath = "~/.agent-view/bin/av"
+    if (this.avPath !== defaultPath) {
+      try {
+        const sshArgs = [
+          ...sshOptions(this.host),
+          this.host,
+          `${defaultPath} -v`
+        ]
+        const { stdout } = await execFileAsync("ssh", sshArgs, {
+          timeout: SSH_TIMEOUT * 1000
+        })
+        const version = stdout.trim()
+        return { ok: true, version, path: defaultPath }
+      } catch {
+        // Default path also failed
+      }
+    }
+
+    return { ok: false, error: "av not found on remote" }
+  }
+
+  /**
+   * Install av on the remote host using the install script
+   */
+  async installAv(): Promise<{ success: boolean; error?: string }> {
+    try {
+      // Don't use BatchMode for install - it needs to run curl | bash
+      const sshArgs = [
+        "-o", `ConnectTimeout=${SSH_TIMEOUT}`,
+        "-o", "StrictHostKeyChecking=accept-new",
+        this.host,
+        "curl -fsSL https://raw.githubusercontent.com/frayo44/agent-view/main/install.sh | bash"
+      ]
+
+      log(`Installing av on remote: ssh ${sshArgs.join(" ")}`)
+
+      const { stdout, stderr } = await execFileAsync("ssh", sshArgs, {
+        timeout: 180000, // 3 minutes for install
+        maxBuffer: 10 * 1024 * 1024
+      })
+
+      log(`Install stdout: ${stdout}`)
+      if (stderr) {
+        log(`Install stderr: ${stderr}`)
+      }
+
+      return { success: true }
     } catch (err: any) {
-      return { ok: false, error: err.message }
+      log(`Install error: ${err.message}`)
+      return { success: false, error: err.message }
     }
   }
 
