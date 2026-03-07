@@ -13,6 +13,11 @@ export interface WorktreeConfig {
   autoCleanup?: boolean
 }
 
+export interface RemoteConfig {
+  host: string           // SSH destination (e.g., "user@host")
+  avPath?: string        // Remote agent-view/av binary path (default: "av")
+}
+
 export interface AppConfig {
   defaultTool?: Tool
   theme?: string
@@ -22,6 +27,7 @@ export interface AppConfig {
   recents?: Recent[]
   autoHibernateMinutes?: number   // 0 = disabled, default 0
   autoHibernatePrompted?: boolean // true = user has seen the prompt
+  remotes?: Record<string, RemoteConfig>  // Named remote hosts for SSH sessions
 }
 
 const CONFIG_DIR = path.join(os.homedir(), ".agent-view")
@@ -67,7 +73,8 @@ export async function loadConfig(): Promise<AppConfig> {
       },
       // Shortcuts array is replaced entirely, not merged with defaults
       shortcuts: parsed.shortcuts || [],
-      recents: parsed.recents || []
+      recents: parsed.recents || [],
+      remotes: parsed.remotes || {}
     }
 
     return cachedConfig
@@ -95,6 +102,13 @@ export function getShortcuts(): Shortcut[] {
  */
 export function getRecents(): Recent[] {
   return cachedConfig.recents || []
+}
+
+/**
+ * Get remotes from the cached config
+ */
+export function getRemotes(): Record<string, RemoteConfig> {
+  return cachedConfig.remotes || {}
 }
 
 /**

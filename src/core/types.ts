@@ -40,6 +40,11 @@ export interface Session {
   acknowledged: boolean
 }
 
+export interface RemoteSession extends Session {
+  remoteName: string     // Key from remotes config
+  remoteHost: string     // SSH host
+}
+
 export interface Group {
   path: string
   name: string
@@ -131,6 +136,10 @@ export interface Config {
   keybinds?: Record<string, string>
   shortcuts?: Shortcut[]
   recents?: Recent[]
+}
+
+export function isRemoteSession(session: Session): session is RemoteSession {
+  return "remoteName" in session && "remoteHost" in session
 }
 
 export function getToolCommand(tool: Tool, customCmd?: string): string {

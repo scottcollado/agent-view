@@ -7,7 +7,9 @@ import { createSignal, createEffect, onCleanup, batch } from "solid-js"
 import { createStore, produce } from "solid-js/store"
 import { getStorage } from "@/core/storage"
 import { getSessionManager } from "@/core/session"
-import type { Session, Group, Config } from "@/core/types"
+import { getRemoteManager } from "@/core/remote"
+import type { Session, Group, Config, RemoteSession } from "@/core/types"
+import { isRemoteSession } from "@/core/types"
 import { createSimpleContext } from "./helper"
 
 export type SyncStatus = "loading" | "partial" | "complete"
@@ -20,10 +22,12 @@ export const { use: useSync, provider: SyncProvider } = createSimpleContext({
       sessions: Session[]
       groups: Group[]
       config: Config
+      remoteSessions: RemoteSession[]
     }>({
       sessions: [],
       groups: [],
-      config: {}
+      config: {},
+      remoteSessions: []
     })
 
     // In-memory reactive store for per-session memory usage (KB)
@@ -32,6 +36,7 @@ export const { use: useSync, provider: SyncProvider } = createSimpleContext({
     // Initial load
     const storage = getStorage()
     const manager = getSessionManager()
+    const remoteManager = getRemoteManager()
 
     // Load sessions and groups
     function refresh() {
@@ -55,7 +60,18 @@ export const { use: useSync, provider: SyncProvider } = createSimpleContext({
       })
     }
 
+    // Refresh remote sessions (async, doesn't block)
+    async function refreshRemote(force = false) {
+      try {
+        const remoteSessions = await remoteManager.fetchAllSessions(force)
+        setStore("remoteSessions", remoteSessions)
+      } catch {
+        // Ignore errors - remote sessions are optional
+      }
+    }
+
     refresh()
+    refreshRemote()
     setStatus("complete")
 
     // Start refresh loop
@@ -71,8 +87,14 @@ export const { use: useSync, provider: SyncProvider } = createSimpleContext({
       }
     }, 200)
 
+    // Poll remote sessions less frequently (every 10 seconds)
+    const remotePollInterval = setInterval(() => {
+      refreshRemote()
+    }, 10000)
+
     onCleanup(() => {
       clearInterval(pollInterval)
+      clearInterval(remotePollInterval)
       manager.stopRefreshLoop()
     })
 
@@ -210,7 +232,39 @@ export const { use: useSync, provider: SyncProvider } = createSimpleContext({
           refresh()
         }
       },
-      refresh
+      remote: {
+        list(): RemoteSession[] {
+          return store.remoteSessions
+        },
+        async refresh(): Promise<void> {
+          await refreshRemote(true)
+        },
+        async stop(session: RemoteSession): Promise<void> {
+          await remoteManager.stopSession(session)
+          await refreshRemote(true)
+        },
+        async restart(session: RemoteSession): Promise<void> {
+          await remoteManager.restartSession(session)
+          await refreshRemote(true)
+        },
+        async delete(session: RemoteSession): Promise<void> {
+          await remoteManager.deleteSession(session)
+          await refreshRemote(true)
+        },
+        async hibernate(session: RemoteSession): Promise<void> {
+          await remoteManager.hibernateSession(session)
+          await refreshRemote(true)
+        },
+        async resume(session: RemoteSession): Promise<void> {
+          await remoteManager.resumeSession(session)
+          await refreshRemote(true)
+        },
+        attach(session: RemoteSession): void {
+          remoteManager.attachSession(session)
+        }
+      },
+      refresh,
+      refreshRemote
     }
   }
 })
