@@ -20,6 +20,7 @@ import { DialogMove } from "@tui/component/dialog-move"
 import { DialogShortcuts } from "@tui/component/dialog-shortcuts"
 import { DialogRecents } from "@tui/component/dialog-recents"
 import { DialogSettings } from "@tui/component/dialog-settings"
+import { DialogNewRemote } from "@tui/component/dialog-new-remote"
 import { DialogHelp } from "@tui/component/dialog-help"
 import { getShortcuts } from "@/core/config"
 import { executeShortcut, getShortcutGroupPath } from "@/core/shortcut"
@@ -28,7 +29,8 @@ import { useKV } from "@tui/context/kv"
 import { DialogUpdate } from "@tui/component/dialog-update"
 import { attachSessionSync, capturePane, wasCommandPaletteRequested, wasSessionListRequested, sendKeys } from "@/core/tmux"
 import { useCommandDialog } from "@tui/component/dialog-command"
-import type { Session, Group } from "@/core/types"
+import type { Session, Group, RemoteSession } from "@/core/types"
+import { isRemoteSession } from "@/core/types"
 import { formatRelativeTime, truncatePath } from "@tui/util/locale"
 import { STATUS_ICONS } from "@tui/util/status"
 import { sortSessionsByCreatedAt } from "@tui/util/session"
@@ -118,10 +120,16 @@ export function Home() {
   // Calculate longest session/group title for dynamic panel sizing
   const longestTitleLen = createMemo(() => {
     const sessions = sync.session.list()
+    const remoteSessions = sync.remote.list()
     const groups = sync.group.list()
     let maxLen = 0
     for (const s of sessions) {
       if (s.title.length > maxLen) maxLen = s.title.length
+    }
+    for (const s of remoteSessions) {
+      // Remote sessions show "title @host" so include host length
+      const displayLen = s.title.length + s.remoteName.length + 2
+      if (displayLen > maxLen) maxLen = displayLen
     }
     for (const g of groups) {
       if (g.name.length > maxLen) maxLen = g.name.length
@@ -157,7 +165,9 @@ export function Home() {
     }
   })
 
-  const allSessions = createMemo(() => sync.session.list())
+  const localSessions = createMemo(() => sync.session.list())
+  const remoteSessions = createMemo(() => sync.remote.list())
+  const allSessions = createMemo(() => [...localSessions(), ...remoteSessions()])
 
   const groupedItems = createMemo(() => {
     const groups = ensureDefaultGroup(sync.group.list())
@@ -253,10 +263,12 @@ export function Home() {
 
   const stats = createMemo(() => {
     const byStatus = sync.session.byStatus()
+    const remotes = remoteSessions()
     return {
-      running: byStatus.running.length,
-      waiting: byStatus.waiting.length,
-      total: sync.session.list().length
+      running: byStatus.running.length + remotes.filter(s => s.status === "running").length,
+      waiting: byStatus.waiting.length + remotes.filter(s => s.status === "waiting").length,
+      total: sync.session.list().length,
+      remoteTotal: remotes.length
     }
   })
 
@@ -293,25 +305,80 @@ export function Home() {
   function doAttach(session: Session) {
     previewFetchAbort = true
     renderer.suspend()
+    let remoteSessionListRequested = false
     try {
-      attachSessionSync(session.tmuxSession)
+      if (isRemoteSession(session)) {
+        // Attach to remote session via SSH - returns true if Ctrl+L was pressed
+        remoteSessionListRequested = sync.remote.attach(session)
+      } else {
+        attachSessionSync(session.tmuxSession)
+      }
     } catch (err) {
       console.error("Attach error:", err)
     }
     renderer.resume()
     sync.refresh()
 
-    // Check if user pressed Ctrl+K to open command palette
-    if (wasCommandPaletteRequested()) {
-      command.open()
-    }
-    // Check if user pressed Ctrl+L to open session list
-    if (wasSessionListRequested()) {
-      dialog.replace(() => <DialogSessions />)
+    if (isRemoteSession(session)) {
+      sync.refreshRemote()
+      // Check if Ctrl+L was pressed on remote
+      if (remoteSessionListRequested) {
+        dialog.replace(() => <DialogSessions />)
+      }
+    } else {
+      // Check if user pressed Ctrl+K to open command palette (local only)
+      if (wasCommandPaletteRequested()) {
+        command.open()
+      }
+      // Check if user pressed Ctrl+L to open session list (local only)
+      if (wasSessionListRequested()) {
+        dialog.replace(() => <DialogSessions />)
+      }
     }
   }
 
   function handleAttach(session: Session) {
+    // For remote sessions, check remoteName instead of tmuxSession
+    if (isRemoteSession(session)) {
+      // If remote session is stopped or hibernated, offer to resume or restart
+      if (session.status === "stopped" || session.status === "hibernated") {
+        const isClaudeWithSession = session.tool === "claude" && session.toolData?.claudeSessionId
+        const options = [
+          ...(isClaudeWithSession
+            ? [{ title: "Resume session", value: "resume" }]
+            : []),
+          { title: "Restart session", value: "restart" },
+        ]
+
+        dialog.replace(() => (
+          <DialogSelect
+            title={`"${session.title}" is ${session.status} (@${session.remoteName})`}
+            options={options}
+            onSelect={async (opt) => {
+              dialog.clear()
+              try {
+                if (opt.value === "resume") {
+                  await sync.remote.resume(session)
+                } else {
+                  await sync.remote.restart(session)
+                }
+                toast.show({ message: `Session ${opt.value === "resume" ? "resumed" : "restarted"}`, variant: "success", duration: 2000 })
+                await sync.refreshRemote()
+                doAttach(session)
+              } catch (err) {
+                toast.error(err as Error)
+              }
+            }}
+          />
+        ))
+        return
+      }
+
+      doAttach(session)
+      return
+    }
+
+    // Local session handling
     if (!session.tmuxSession) {
       toast.show({ message: "Session has no tmux session", variant: "error", duration: 2000 })
       return
@@ -356,6 +423,31 @@ export function Home() {
   }
 
   async function handleDelete(session: Session) {
+    // Handle remote session deletion
+    if (isRemoteSession(session)) {
+      dialog.replace(() => (
+        <DialogSelect
+          title={`Delete "${session.title}" on @${session.remoteName}?`}
+          options={[
+            { title: "Delete", value: "delete" },
+            { title: "Cancel", value: "cancel" },
+          ]}
+          onSelect={async (opt) => {
+            dialog.clear()
+            if (opt.value === "cancel") return
+            try {
+              await sync.remote.delete(session)
+              toast.show({ message: `Deleted ${session.title} on @${session.remoteName}`, variant: "info", duration: 2000 })
+            } catch (err) {
+              toast.error(err as Error)
+            }
+          }}
+        />
+      ))
+      return
+    }
+
+    // Local session deletion
     if (session.worktreePath) {
       dialog.replace(() => (
         <DialogSelect
@@ -380,19 +472,40 @@ export function Home() {
       ))
       return
     }
-    try {
-      await sync.session.delete(session.id)
-      toast.show({ message: `Deleted ${session.title}`, variant: "info", duration: 2000 })
-    } catch (err) {
-      toast.error(err as Error)
-    }
+
+    // Local session without worktree - show confirmation dialog
+    dialog.replace(() => (
+      <DialogSelect
+        title={`Delete "${session.title}"?`}
+        options={[
+          { title: "Delete", value: "delete" },
+          { title: "Cancel", value: "cancel" },
+        ]}
+        onSelect={async (opt) => {
+          dialog.clear()
+          if (opt.value === "cancel") return
+          try {
+            await sync.session.delete(session.id)
+            toast.show({ message: `Deleted ${session.title}`, variant: "info", duration: 2000 })
+          } catch (err) {
+            toast.error(err as Error)
+          }
+        }}
+      />
+    ))
   }
 
   async function handleRestart(session: Session) {
     try {
-      await sync.session.restart(session.id)
-      toast.show({ message: "Session restarted", variant: "success", duration: 2000 })
-      sync.refresh()
+      if (isRemoteSession(session)) {
+        await sync.remote.restart(session)
+        toast.show({ message: `Session restarted on @${session.remoteName}`, variant: "success", duration: 2000 })
+        await sync.refreshRemote()
+      } else {
+        await sync.session.restart(session.id)
+        toast.show({ message: "Session restarted", variant: "success", duration: 2000 })
+        sync.refresh()
+      }
     } catch (err) {
       toast.error(err as Error)
     }
@@ -416,6 +529,12 @@ export function Home() {
 
   async function handleFork(session: Session) {
     log("handleFork called for session:", session.id, "tool:", session.tool, "projectPath:", session.projectPath)
+
+    if (isRemoteSession(session)) {
+      log("Fork rejected: remote session")
+      toast.show({ message: "Remote sessions cannot be forked from here", variant: "error", duration: 2000 })
+      return
+    }
 
     if (session.tool !== "claude") {
       log("Fork rejected: not a claude session")
@@ -451,9 +570,15 @@ export function Home() {
 
   async function handleHibernate(session: Session) {
     try {
-      await sync.session.hibernate(session.id)
-      toast.show({ message: `Hibernated ${session.title}`, variant: "success", duration: 2000 })
-      sync.refresh()
+      if (isRemoteSession(session)) {
+        await sync.remote.hibernate(session)
+        toast.show({ message: `Hibernated ${session.title} on @${session.remoteName}`, variant: "success", duration: 2000 })
+        await sync.refreshRemote()
+      } else {
+        await sync.session.hibernate(session.id)
+        toast.show({ message: `Hibernated ${session.title}`, variant: "success", duration: 2000 })
+        sync.refresh()
+      }
     } catch (err) {
       toast.error(err as Error)
     }
@@ -575,6 +700,10 @@ export function Home() {
     if (evt.name === "r" && evt.shift) {
       const item = selectedItem()
       if (item?.type === "session" && item.session) {
+        if (isRemoteSession(item.session)) {
+          toast.show({ message: "Rename not supported for remote sessions", variant: "error", duration: 2000 })
+          return
+        }
         dialog.push(() => <DialogRename session={item.session!} />)
       } else if (item?.type === "group" && item.group) {
         dialog.push(() => <DialogGroup mode="rename" group={item.group!} />)
@@ -590,6 +719,10 @@ export function Home() {
     if (evt.name === "m") {
       const session = selectedSession()
       if (session) {
+        if (isRemoteSession(session)) {
+          toast.show({ message: "Move not supported for remote sessions", variant: "error", duration: 2000 })
+          return
+        }
         dialog.push(() => <DialogMove session={session} />)
       }
     }
@@ -609,6 +742,10 @@ export function Home() {
       evt.preventDefault()
       const session = selectedSession()
       if (session) {
+        if (isRemoteSession(session)) {
+          toast.show({ message: "Remote sessions cannot be forked from here", variant: "error", duration: 2000 })
+          return
+        }
         if (session.tool !== "claude") {
           toast.show({ message: "Only Claude sessions can be forked", variant: "error", duration: 2000 })
           return
@@ -638,13 +775,19 @@ export function Home() {
     // y to quick-confirm a waiting session (sends Enter without attaching)
     if (evt.name === "y" && !evt.shift && !evt.ctrl) {
       const session = selectedSession()
-      if (session && session.status === "waiting" && session.tmuxSession) {
-        sendKeys(session.tmuxSession, "").then(() => {
-          toast.show({ message: "✓ Confirmed", variant: "success", duration: 1500 })
-          sync.refresh()
-        }).catch((err) => {
-          toast.error(err as Error)
-        })
+      if (session && session.status === "waiting") {
+        if (isRemoteSession(session)) {
+          toast.show({ message: "Quick confirm not supported for remote sessions", variant: "error", duration: 2000 })
+          return
+        }
+        if (session.tmuxSession) {
+          sendKeys(session.tmuxSession, "").then(() => {
+            toast.show({ message: "✓ Confirmed", variant: "success", duration: 1500 })
+            sync.refresh()
+          }).catch((err) => {
+            toast.error(err as Error)
+          })
+        }
       }
       return
     }
@@ -679,6 +822,12 @@ export function Home() {
     // ? to open help dialog
     if (evt.name === "?") {
       dialog.push(() => <DialogHelp />)
+      return
+    }
+
+    // N (Shift+n) to create new remote session
+    if (evt.name === "n" && evt.shift) {
+      dialog.push(() => <DialogNewRemote />)
       return
     }
 
@@ -754,6 +903,7 @@ export function Home() {
 
   function SessionItem(props: { session: Session; index: number; indented?: boolean }) {
     const isSelected = createMemo(() => props.index === selectedIndex())
+    const isRemote = createMemo(() => isRemoteSession(props.session))
     const statusColor = createMemo(() => {
       switch (props.session.status) {
         case "running": return theme.success
@@ -775,6 +925,11 @@ export function Home() {
       reserved += 6 // memory indicator (e.g., "512M ")
       if (!useDualColumn()) {
         reserved += 8 // tool name + space in single column mode
+      }
+      // Reserve space for remote indicator
+      if (isRemote()) {
+        const remoteName = (props.session as RemoteSession).remoteName
+        reserved += remoteName.length + 2 // "@name "
       }
       return reserved
     })
@@ -814,6 +969,13 @@ export function Home() {
         >
           {title()}
         </text>
+
+        {/* Remote indicator */}
+        <Show when={isRemote()}>
+          <text fg={isSelected() ? theme.selectedListItemText : theme.info}>
+            {" @" + (props.session as RemoteSession).remoteName}
+          </text>
+        </Show>
 
         {/* Spacer */}
         <text flexGrow={1}> </text>
@@ -892,6 +1054,9 @@ export function Home() {
               <Show when={s().worktreeBranch}>
                 <text fg={theme.info}>{s().worktreeBranch}</text>
               </Show>
+              <Show when={isRemoteSession(s())}>
+                <text fg={theme.info}>@{(s() as RemoteSession).remoteName}</text>
+              </Show>
             </box>
 
             {/* Separator */}
@@ -956,6 +1121,9 @@ export function Home() {
             <text fg={theme.warning}>◐ {stats().waiting}</text>
           </Show>
           <text fg={theme.textMuted}>{stats().total} sessions</text>
+          <Show when={stats().remoteTotal > 0}>
+            <text fg={theme.info}>({stats().remoteTotal} remote)</text>
+          </Show>
         </box>
       </box>
 

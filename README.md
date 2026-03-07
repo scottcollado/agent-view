@@ -170,11 +170,34 @@ Create `~/.agent-view/config.json` to customize defaults:
 | `keybind` | No | Direct keybind, e.g. `"<leader>1"`, `"ctrl+1"` |
 | `command` | No | Custom command (required when `tool` is `custom`) |
 
+## Remote Sessions
+
+Manage AI coding sessions running on remote machines (dev boxes, cloud VMs, etc.) from your local Agent View dashboard.
+
+### Setup
+
+1. Install `av` on the remote machine
+2. Ensure SSH access is configured (key-based auth recommended)
+3. Press `Shift+N` to create a remote session
+
+### Creating Remote Sessions
+
+Press `Shift+N` to open the remote session wizard:
+
+1. **SSH Host** - Enter the SSH destination (e.g., `user@hostname` or an SSH config name)
+2. **av Path** - Path to `av` binary on remote (default: `av`)
+3. **Tool** - Select the AI tool to use
+4. **Project Path** - Working directory on the remote machine
+5. **Title** - Optional session name
+
+Values are remembered for next time.
+
 ## Requirements
 
 - [Bun](https://bun.sh) runtime
 - [tmux](https://github.com/tmux/tmux) for session management
 - At least one AI coding tool installed (claude, gemini, opencode, etc.)
+- For remote sessions: SSH access to remote host with `av` installed
 
 ## Acknowledgments
 

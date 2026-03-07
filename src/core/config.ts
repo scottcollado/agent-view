@@ -13,6 +13,13 @@ export interface WorktreeConfig {
   autoCleanup?: boolean
 }
 
+export interface LastRemoteSession {
+  host: string
+  avPath: string
+  tool: string
+  projectPath: string
+}
+
 export interface AppConfig {
   defaultTool?: Tool
   theme?: string
@@ -22,6 +29,7 @@ export interface AppConfig {
   recents?: Recent[]
   autoHibernateMinutes?: number   // 0 = disabled, default 0
   autoHibernatePrompted?: boolean // true = user has seen the prompt
+  lastRemoteSession?: LastRemoteSession   // Last used remote session values
 }
 
 const CONFIG_DIR = path.join(os.homedir(), ".agent-view")
@@ -95,6 +103,21 @@ export function getShortcuts(): Shortcut[] {
  */
 export function getRecents(): Recent[] {
   return cachedConfig.recents || []
+}
+
+/**
+ * Get last remote session values
+ */
+export function getLastRemoteSession(): LastRemoteSession | undefined {
+  return cachedConfig.lastRemoteSession
+}
+
+/**
+ * Save last remote session values
+ */
+export async function saveLastRemoteSession(session: LastRemoteSession): Promise<void> {
+  const config = await loadConfig()
+  await saveConfig({ ...config, lastRemoteSession: session })
 }
 
 /**
