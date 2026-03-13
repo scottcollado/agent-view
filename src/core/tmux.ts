@@ -425,6 +425,9 @@ const CLAUDE_WAITING_PATTERNS = [
   /Yes,? allow once/i,
   /Allow always/i,
   /No,? and tell Claude/i,
+  // AskUserQuestion tool renders as a selection UI
+  /Select an option/i,
+  /Other \(provide your own\)/i,
 ]
 
 // Patterns indicating Claude has exited (shell returned)
@@ -499,7 +502,12 @@ export function parseToolStatus(output: string, tool?: string): ToolStatus {
     isWaiting = WAITING_PATTERNS.some(p => p.test(lastLines))
   }
 
-  hasError = ERROR_PATTERNS.some(p => p.test(lastLines))
+  // Only check error patterns for non-Claude tools. Claude Code's conversation
+  // output regularly mentions errors (discussing bugs, stack traces, etc.) which
+  // causes false positives. Claude handles its own errors internally.
+  if (tool !== "claude") {
+    hasError = ERROR_PATTERNS.some(p => p.test(lastLines))
+  }
 
   return {
     isActive: false, // Determined by activity timestamp

@@ -3,6 +3,7 @@
  */
 
 import type { Session, Group } from "@/core/types"
+import { sortSessionsByCreatedAt } from "./session"
 
 export interface GroupedItem {
   type: "group" | "session"
@@ -36,29 +37,58 @@ export function ensureDefaultGroup(groups: Group[]): Group[] {
  * Flatten groups and sessions into a navigable list
  * Returns an array where each item is either a group header or a session
  */
+/**
+ * Check if a session needs immediate attention (should break out of groups)
+ */
+function needsAttention(s: Session): boolean {
+  return s.status === "waiting" || (!s.acknowledged && s.status === "idle")
+}
+
 export function flattenGroupTree(sessions: Session[], groups: Group[]): GroupedItem[] {
   const result: GroupedItem[] = []
+
+  // Pull out sessions that need attention — they go at the very top, ungrouped
+  const attentionSessions: Session[] = []
+  const attentionIds = new Set<string>()
+  for (const session of sessions) {
+    if (needsAttention(session)) {
+      attentionSessions.push(session)
+      attentionIds.add(session.id)
+    }
+  }
+
+  // Sort attention sessions: waiting first, then unviewed
+  if (attentionSessions.length > 0) {
+    const sorted = sortSessionsByCreatedAt(attentionSessions)
+    for (let i = 0; i < sorted.length; i++) {
+      result.push({
+        type: "session",
+        session: sorted[i],
+        groupPath: sorted[i].groupPath || DEFAULT_GROUP_PATH,
+        isLast: i === sorted.length - 1
+      })
+    }
+  }
 
   // Sort groups by order
   const sortedGroups = [...groups].sort((a, b) => a.order - b.order)
 
-  // Create a map of groupPath -> sessions
+  // Create a map of groupPath -> sessions (excluding attention sessions)
   const sessionsByGroup = new Map<string, Session[]>()
   for (const session of sessions) {
+    if (attentionIds.has(session.id)) continue
     const groupPath = session.groupPath || DEFAULT_GROUP_PATH
     const existing = sessionsByGroup.get(groupPath) || []
     existing.push(session)
     sessionsByGroup.set(groupPath, existing)
   }
 
-  // Sort sessions within each group by creation time
+  // Sort sessions within each group
   for (const [path, groupSessions] of sessionsByGroup) {
-    sessionsByGroup.set(path, groupSessions.sort((a, b) =>
-      b.createdAt.getTime() - a.createdAt.getTime()
-    ))
+    sessionsByGroup.set(path, sortSessionsByCreatedAt(groupSessions))
   }
 
-  // Build flattened list
+  // Build grouped list
   let groupIndex = 1
   for (const group of sortedGroups) {
     const groupSessions = sessionsByGroup.get(group.path) || []

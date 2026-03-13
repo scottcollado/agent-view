@@ -32,7 +32,7 @@ import { useCommandDialog } from "@tui/component/dialog-command"
 import type { Session, Group, RemoteSession } from "@/core/types"
 import { isRemoteSession } from "@/core/types"
 import { formatRelativeTime, truncatePath } from "@tui/util/locale"
-import { STATUS_ICONS } from "@tui/util/status"
+import { STATUS_ICONS, UNVIEWED_ICON } from "@tui/util/status"
 import { sortSessionsByCreatedAt } from "@tui/util/session"
 import { createListNavigation } from "@tui/util/navigation"
 import {
@@ -304,6 +304,10 @@ export function Home() {
 
   function doAttach(session: Session) {
     previewFetchAbort = true
+
+    // Mark as viewed when user attaches
+    sync.session.acknowledge(session.id)
+
     renderer.suspend()
     let remoteSessionListRequested = false
     try {
@@ -849,11 +853,6 @@ export function Home() {
         paddingRight={1}
         height={1}
         backgroundColor={isSelected() ? theme.primary : theme.backgroundElement}
-        onMouseUp={() => {
-          setSelectedIndex(props.index)
-          sync.group.toggle(props.group.path)
-        }}
-        onMouseOver={() => setSelectedIndex(props.index)}
       >
         {/* Expand/collapse arrow */}
         <text fg={isSelected() ? theme.selectedListItemText : theme.accent}>
@@ -891,10 +890,13 @@ export function Home() {
   function SessionItem(props: { session: Session; index: number; indented?: boolean }) {
     const isSelected = createMemo(() => props.index === selectedIndex())
     const isRemote = createMemo(() => isRemoteSession(props.session))
+    const isUnviewed = createMemo(() => !props.session.acknowledged && props.session.status === "idle")
     const statusColor = createMemo(() => {
+      if (props.session.status === "waiting") return theme.error
+      if (isUnviewed()) return theme.info
       switch (props.session.status) {
         case "running": return theme.success
-        case "waiting": return theme.warning
+        case "background": return theme.accent
         case "error": return theme.error
         case "hibernated": return theme.secondary
         default: return theme.textMuted
@@ -908,7 +910,7 @@ export function Home() {
     const reservedWidth = createMemo(() => {
       let reserved = 2 // left + right padding
       reserved += indent // indentation
-      reserved += 2 // status icon + space
+      reserved += 2 // status indicator width
       reserved += 6 // memory indicator (e.g., "512M ")
       if (!useDualColumn()) {
         reserved += 8 // tool name + space in single column mode
@@ -936,16 +938,14 @@ export function Home() {
         paddingRight={1}
         height={1}
         backgroundColor={isSelected() ? theme.primary : undefined}
-        onMouseUp={() => {
-          setSelectedIndex(props.index)
-          handleAttach(props.session)
-        }}
-        onMouseOver={() => setSelectedIndex(props.index)}
       >
-        {/* Status icon with fixed width */}
+        {/* Status indicator */}
         <box width={2} flexShrink={0}>
-          <text fg={isSelected() ? theme.selectedListItemText : statusColor()}>
-            {STATUS_ICONS[props.session.status]}
+          <text
+            fg={isSelected() ? theme.selectedListItemText : statusColor()}
+            attributes={props.session.status === "waiting" || isUnviewed() ? TextAttributes.BOLD : undefined}
+          >
+            {isUnviewed() ? UNVIEWED_ICON : STATUS_ICONS[props.session.status]}
           </text>
         </box>
 
@@ -1002,9 +1002,11 @@ export function Home() {
     const statusColor = createMemo(() => {
       const s = session()
       if (!s) return theme.textMuted
+      if (s.status === "waiting") return theme.error
+      if (!s.acknowledged && s.status === "idle") return theme.info
       switch (s.status) {
         case "running": return theme.success
-        case "waiting": return theme.warning
+        case "background": return theme.accent
         case "error": return theme.error
         case "hibernated": return theme.secondary
         default: return theme.textMuted

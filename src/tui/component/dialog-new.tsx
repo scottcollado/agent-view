@@ -177,7 +177,7 @@ export function DialogNew() {
     const fields: FocusField[] = ["title", "tool"]
     if (selectedTool() === "claude") {
       fields.push("resumeSession")
-      fields.push("skipPermissions")
+      // skipPermissions removed in fork (security risk with MCP access)
     }
     if (selectedTool() === "custom") {
       fields.push("customCommand")
@@ -466,21 +466,7 @@ export function DialogNew() {
               Resume
             </text>
           </box>
-          <box
-            flexDirection="row"
-            gap={1}
-            onMouseUp={() => {
-              setFocusedField("skipPermissions")
-              setSkipPermissions(!skipPermissions())
-            }}
-          >
-            <text fg={focusedField() === "skipPermissions" ? theme.primary : theme.textMuted}>
-              {skipPermissions() ? "[x]" : "[ ]"}
-            </text>
-            <text fg={focusedField() === "skipPermissions" ? theme.text : theme.textMuted}>
-              Skip Permissions
-            </text>
-          </box>
+          {/* skipPermissions checkbox removed in fork (security risk with MCP access) */}
         </box>
       </Show>
 

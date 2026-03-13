@@ -5,6 +5,7 @@
 
 export type SessionStatus =
   | "running"     // Agent is actively working
+  | "background"  // Main session idle, background agents running
   | "waiting"     // Agent needs input/approval
   | "idle"        // Session exists but agent is not active
   | "error"       // Session has an error

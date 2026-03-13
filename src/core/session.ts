@@ -7,6 +7,7 @@ import { getStorage } from "./storage"
 import type { Session, SessionCreateOptions, SessionForkOptions, SessionStatus, Tool, Recent } from "./types"
 import { getToolCommand } from "./types"
 import * as tmux from "./tmux"
+import { execFile } from "child_process"
 import { removeWorktree } from "./git"
 import { randomUUID } from "crypto"
 import path from "path"
@@ -15,6 +16,44 @@ import os from "os"
 import { buildForkCommand, buildClaudeCommand, copySessionToProject, sessionFileExists } from "./claude"
 import { getConfig, saveConfig } from "./config"
 import { addRecent } from "./recents"
+
+const HOOK_STATUS_FILE = path.join(os.homedir(), ".claude", "agent-status.json")
+let hookStatusCache: { data: Record<string, any>; mtime: number } = { data: {}, mtime: 0 }
+
+/**
+ * Read the Claude Code hooks status file for supplementary session info.
+ * Cached by mtime to avoid repeated reads on every refresh cycle.
+ */
+function readHookStatus(): Record<string, any> {
+  try {
+    const stat = fs.statSync(HOOK_STATUS_FILE)
+    if (stat.mtimeMs === hookStatusCache.mtime) return hookStatusCache.data
+    const raw = JSON.parse(fs.readFileSync(HOOK_STATUS_FILE, "utf-8"))
+    hookStatusCache = { data: raw.sessions || {}, mtime: stat.mtimeMs }
+    return hookStatusCache.data
+  } catch {
+    return {}
+  }
+}
+
+/**
+ * Send a macOS notification via terminal-notifier.
+ * Fires and forgets — never blocks the refresh loop.
+ */
+const NOTIFIER = "/opt/homebrew/bin/terminal-notifier"
+
+function notify(title: string, message: string): void {
+  try {
+    execFile(NOTIFIER, [
+      "-title", title,
+      "-message", message,
+      "-sound", "Glass",
+      "-group", "agent-view"
+    ], { timeout: 3000 }, () => {})
+  } catch {
+    // terminal-notifier not installed or failed — silently skip
+  }
+}
 
 const logFile = path.join(os.homedir(), ".agent-orchestrator", "debug.log")
 function log(...args: unknown[]) {
@@ -105,18 +144,52 @@ export class SessionManager {
         })
         const status = tmux.parseToolStatus(output, session.tool)
 
+        // Determine new status
+        // For Claude sessions: only trust isBusy (Claude-specific patterns like
+        // spinners, "ctrl+c to interrupt") for the "running" state. Generic tmux
+        // activity (isActive) is too noisy — detaching, resizing, and cursor
+        // movement all trigger it, causing false running→idle transitions.
+        let newStatus: "waiting" | "error" | "running" | "idle"
         if (status.isWaiting) {
-          // Agent is waiting for user input (permission prompt, question, etc.)
-          storage.writeStatus(session.id, "waiting", session.tool)
+          newStatus = "waiting"
         } else if (status.hasError) {
-          // Agent encountered an error
-          storage.writeStatus(session.id, "error", session.tool)
-        } else if (status.isBusy || isActive) {
-          // Agent is actively working (spinner visible, recent output, etc.)
-          storage.writeStatus(session.id, "running", session.tool)
+          newStatus = "error"
+        } else if (status.isBusy || (isActive && session.tool !== "claude")) {
+          newStatus = "running"
+        } else if (isActive && session.tool === "claude" && session.status === "running") {
+          // Claude session was already running and tmux still shows activity —
+          // keep it running (don't flap to idle prematurely)
+          newStatus = "running"
         } else {
-          // No recent activity and no waiting prompt - idle
-          storage.writeStatus(session.id, "idle", session.tool)
+          newStatus = "idle"
+        }
+
+        // For Claude sessions: check if hooks report background agents running
+        if (newStatus === "idle" && session.tool === "claude") {
+          const hookSessions = readHookStatus()
+          const claudeSessionId = session.toolData?.claudeSessionId as string | undefined
+          if (claudeSessionId) {
+            const hookInfo = hookSessions[claudeSessionId]
+            if (hookInfo?.status === "background" || hookInfo?.background_agents) {
+              newStatus = "background"
+            }
+          }
+        }
+
+        // Mark unacknowledged when agent finishes real work (running → idle/waiting/error)
+        if (session.status === "running" && newStatus !== "running" && newStatus !== "background") {
+          storage.setAcknowledged(session.id, false)
+          notify("Agent done", session.title)
+        }
+
+        // Notify when a session starts waiting for input
+        if (newStatus === "waiting" && session.status !== "waiting") {
+          notify("Agent needs review", session.title)
+        }
+
+        storage.writeStatus(session.id, newStatus, session.tool)
+
+        if (newStatus === "idle") {
 
           // Auto-hibernate: if idle too long, hibernate Claude sessions
           if (autoHibernateMs > 0 && session.tool === "claude" && session.toolData?.claudeSessionId) {

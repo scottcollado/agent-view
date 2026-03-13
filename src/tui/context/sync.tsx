@@ -115,6 +115,7 @@ export const { use: useSync, provider: SyncProvider } = createSimpleContext({
         byStatus() {
           return {
             running: store.sessions.filter((s) => s.status === "running"),
+            background: store.sessions.filter((s) => s.status === "background"),
             waiting: store.sessions.filter((s) => s.status === "waiting"),
             idle: store.sessions.filter((s) => s.status === "idle"),
             stopped: store.sessions.filter((s) => s.status === "stopped"),
@@ -181,6 +182,10 @@ export const { use: useSync, provider: SyncProvider } = createSimpleContext({
         },
         drainAutoHibernated() {
           return manager.drainAutoHibernated()
+        },
+        acknowledge(id: string): void {
+          manager.acknowledge(id)
+          refresh()
         }
       },
       group: {

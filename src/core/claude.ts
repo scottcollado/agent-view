@@ -349,9 +349,7 @@ export function buildClaudeCommand(options?: ClaudeOptions): string {
     parts.push("--resume")
   }
 
-  if (options?.skipPermissions) {
-    parts.push("--dangerously-skip-permissions")
-  }
+  // skipPermissions removed in fork (security risk with MCP access)
 
   return parts.join(" ")
 }
