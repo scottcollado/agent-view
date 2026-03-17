@@ -23,6 +23,7 @@ import { DialogSettings } from "@tui/component/dialog-settings"
 import { DialogNewRemote } from "@tui/component/dialog-new-remote"
 import { DialogHelp } from "@tui/component/dialog-help"
 import { getShortcuts } from "@/core/config"
+import { getLastUserPrompts } from "@/core/claude"
 import { executeShortcut, getShortcutGroupPath } from "@/core/shortcut"
 import { useKeybind } from "@tui/context/keybind"
 import { useKV } from "@tui/context/kv"
@@ -110,6 +111,7 @@ export function Home() {
   const [selectedIndex, setSelectedIndex] = createSignal(0)
   const [previewContent, setPreviewContent] = createSignal<string>("")
   const [previewLoading, setPreviewLoading] = createSignal(false)
+  const [lastPrompts, setLastPrompts] = createSignal<string[]>([])
   let scrollRef: ScrollBoxRenderable | undefined
   let previewScrollRef: ScrollBoxRenderable | undefined
   let previewDebounceTimer: ReturnType<typeof setTimeout> | undefined
@@ -210,7 +212,15 @@ export function Home() {
     if (!session || !session.tmuxSession) {
       setPreviewContent("")
       setPreviewLoading(false)
+      setLastPrompts([])
       return
+    }
+
+    // Fetch last user prompts for Claude sessions (sync read, fast)
+    if (session.tool === "claude" && session.toolData?.claudeSessionId) {
+      setLastPrompts(getLastUserPrompts(session.projectPath, session.toolData.claudeSessionId as string))
+    } else {
+      setLastPrompts([])
     }
 
     // Only show loading if we have no content yet (first load)
@@ -218,12 +228,6 @@ export function Home() {
       setPreviewLoading(true)
     }
     previewFetchAbort = false
-    // Reset scroll position for new session
-    setTimeout(() => {
-      if (previewScrollRef) {
-        previewScrollRef.scrollTo(previewScrollRef.scrollHeight || 0)
-      }
-    }, 0)
 
     // Debounce: 150ms delay to prevent rapid fetching during navigation
     previewDebounceTimer = setTimeout(async () => {
@@ -237,11 +241,14 @@ export function Home() {
 
         if (!previewFetchAbort) {
           setPreviewContent(content)
-          // Scroll to bottom after render
+          // Scroll to bottom after render — double setTimeout ensures
+          // Solid.js has flushed the DOM update before we read scrollHeight
           setTimeout(() => {
-            if (previewScrollRef) {
-              previewScrollRef.scrollTo(previewScrollRef.scrollHeight || 0)
-            }
+            setTimeout(() => {
+              if (previewScrollRef) {
+                previewScrollRef.scrollTo(previewScrollRef.scrollHeight || 0)
+              }
+            }, 0)
           }, 0)
         }
       } catch {
@@ -1047,6 +1054,27 @@ export function Home() {
                 <text fg={theme.info}>@{(s() as RemoteSession).remoteName}</text>
               </Show>
             </box>
+
+            {/* Last user prompts */}
+            <Show when={lastPrompts().length > 0}>
+              <box flexDirection="column" paddingTop={1} height={lastPrompts().length + 1}>
+                <For each={[...lastPrompts()].reverse()}>
+                  {(prompt: string, i: Accessor<number>) => {
+                    const maxLen = rightWidth() - 6
+                    const isLatest = i() === lastPrompts().length - 1
+                    const prefix = isLatest ? "> " : "  "
+                    const truncated = prompt.length > maxLen ? prompt.slice(0, maxLen - 3) + "..." : prompt
+                    return (
+                      <box height={1}>
+                        <text fg={isLatest ? theme.text : theme.textMuted}>
+                          {`${prefix}${truncated}`}
+                        </text>
+                      </box>
+                    )
+                  }}
+                </For>
+              </box>
+            </Show>
 
             {/* Separator */}
             <box height={1}>

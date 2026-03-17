@@ -355,6 +355,74 @@ export function buildClaudeCommand(options?: ClaudeOptions): string {
 }
 
 // =============================================================================
+// Last User Prompt
+// =============================================================================
+
+/**
+ * Extract the last N user prompts from a Claude session transcript.
+ * Reads the .jsonl file backwards to find recent user messages.
+ *
+ * @param count - Number of prompts to return (default 3)
+ * @returns Array of prompt strings (most recent first), truncated to 200 chars each
+ */
+export function getLastUserPrompts(projectPath: string, sessionId: string, count: number = 3): string[] {
+  const sessionFile = getSessionFilePath(projectPath, sessionId)
+
+  if (!existsSync(sessionFile)) {
+    return []
+  }
+
+  try {
+    const content = readFileSync(sessionFile, "utf-8")
+    const lines = content.split("\n")
+    const prompts: string[] = []
+
+    for (let i = lines.length - 1; i >= 0 && prompts.length < count; i--) {
+      const line = lines[i].trim()
+      if (!line) continue
+
+      try {
+        const entry = JSON.parse(line)
+        if (entry.type !== "user" || entry.message?.role !== "user") continue
+
+        const msgContent = entry.message.content
+        let text: string | null = null
+
+        if (typeof msgContent === "string") {
+          text = msgContent
+        } else if (Array.isArray(msgContent)) {
+          for (const block of msgContent) {
+            if (typeof block === "string") {
+              text = block
+              break
+            }
+            if (block.type === "text" && typeof block.text === "string") {
+              text = block.text
+              break
+            }
+          }
+        }
+
+        if (!text) continue
+        if (text.trimStart().startsWith("<")) continue
+
+        if (text.length > 200) {
+          text = text.slice(0, 200) + "..."
+        }
+
+        prompts.push(text)
+      } catch {
+        continue
+      }
+    }
+
+    return prompts
+  } catch {
+    return []
+  }
+}
+
+// =============================================================================
 // Session Info
 // =============================================================================
 
