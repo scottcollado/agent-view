@@ -9,8 +9,9 @@
 
 import { homedir } from "os"
 import path from "path"
-import { readdirSync, statSync, readFileSync, existsSync, mkdirSync, copyFileSync } from "fs"
+import { readdirSync, statSync, readFileSync, existsSync, mkdirSync, copyFileSync, openSync, readSync, closeSync } from "fs"
 import type { ClaudeOptions } from "./types"
+import { getConfig } from "./config"
 
 // =============================================================================
 // Constants
@@ -259,6 +260,8 @@ export interface ForkCommandOptions {
   parentSessionId: string
   /** New session ID for the forked session (must be pre-generated) */
   newSessionId: string
+  /** Launch with the API key from config.claudeApiKeyCommand */
+  useApiKey?: boolean
 }
 
 /**
@@ -285,7 +288,7 @@ export function buildForkCommand(options: ForkCommandOptions): string {
   return (
     `cd '${escapedPath}' && ` +
     `tmux set-environment CLAUDE_SESSION_ID "${options.newSessionId}"; ` +
-    `claude --session-id "${options.newSessionId}" --resume ${options.parentSessionId} --fork-session`
+    `${claudeBinary(options.useApiKey)} --session-id "${options.newSessionId}" --resume ${options.parentSessionId} --fork-session`
   )
 }
 
@@ -337,13 +340,26 @@ export function copySessionToProject(
 // =============================================================================
 
 /**
+ * The claude invocation, optionally prefixed with an API key resolved at launch
+ * time from config.claudeApiKeyCommand (the key itself is never stored).
+ */
+export function claudeBinary(useApiKey?: boolean): string {
+  if (!useApiKey) return "claude"
+  const keyCommand = getConfig().claudeApiKeyCommand
+  if (!keyCommand) {
+    throw new Error("API key session requires claudeApiKeyCommand in ~/.agent-view/config.json")
+  }
+  return `ANTHROPIC_API_KEY="$(${keyCommand})" claude`
+}
+
+/**
  * Build the Claude command based on options.
  *
  * @param options - Claude session options
  * @returns Command string (e.g., "claude", "claude --resume", etc.)
  */
 export function buildClaudeCommand(options?: ClaudeOptions): string {
-  const parts: string[] = ["claude"]
+  const parts: string[] = [claudeBinary(options?.useApiKey)]
 
   if (options?.sessionMode === "resume") {
     parts.push("--resume")
@@ -357,6 +373,35 @@ export function buildClaudeCommand(options?: ClaudeOptions): string {
 // =============================================================================
 // Last User Prompt
 // =============================================================================
+
+/**
+ * Text of a typed user prompt, or null for tool results, system-injected
+ * messages (`<command-...>`, `<system-reminder>`), and non-user entries.
+ */
+function userPromptText(entry: any): string | null {
+  if (entry?.type !== "user" || entry.message?.role !== "user") return null
+
+  const msgContent = entry.message.content
+  let text: string | null = null
+
+  if (typeof msgContent === "string") {
+    text = msgContent
+  } else if (Array.isArray(msgContent)) {
+    for (const block of msgContent) {
+      if (typeof block === "string") {
+        text = block
+        break
+      }
+      if (block.type === "text" && typeof block.text === "string") {
+        text = block.text
+        break
+      }
+    }
+  }
+
+  if (!text || text.trimStart().startsWith("<")) return null
+  return text
+}
 
 /**
  * Extract the last N user prompts from a Claude session transcript.
@@ -382,29 +427,8 @@ export function getLastUserPrompts(projectPath: string, sessionId: string, count
       if (!line) continue
 
       try {
-        const entry = JSON.parse(line)
-        if (entry.type !== "user" || entry.message?.role !== "user") continue
-
-        const msgContent = entry.message.content
-        let text: string | null = null
-
-        if (typeof msgContent === "string") {
-          text = msgContent
-        } else if (Array.isArray(msgContent)) {
-          for (const block of msgContent) {
-            if (typeof block === "string") {
-              text = block
-              break
-            }
-            if (block.type === "text" && typeof block.text === "string") {
-              text = block.text
-              break
-            }
-          }
-        }
-
+        let text = userPromptText(JSON.parse(line))
         if (!text) continue
-        if (text.trimStart().startsWith("<")) continue
 
         if (text.length > 200) {
           text = text.slice(0, 200) + "..."
@@ -419,6 +443,60 @@ export function getLastUserPrompts(projectPath: string, sessionId: string, count
     return prompts
   } catch {
     return []
+  }
+}
+
+const PROMPT_TIME_TAIL_BYTES = 256 * 1024
+const promptTimeCache = new Map<string, { mtimeMs: number; time: number | undefined }>()
+
+/**
+ * Timestamp (ms) of the last typed user prompt in a Claude session transcript.
+ * Transcripts last modified before `since` are skipped without reading (their
+ * last prompt can't be newer than the file). Reads the file tail first and only
+ * falls back to the whole file when the tail has no prompt. Cached by mtime.
+ */
+export function getLastUserPromptTime(projectPath: string, sessionId: string, since: number = 0): number | undefined {
+  const sessionFile = getSessionFilePath(projectPath, sessionId)
+
+  try {
+    const { mtimeMs, size } = statSync(sessionFile)
+    if (mtimeMs < since) return undefined
+
+    const cached = promptTimeCache.get(sessionFile)
+    if (cached?.mtimeMs === mtimeMs) return cached.time
+
+    const lastPromptTime = (content: string): number | undefined => {
+      const lines = content.split("\n")
+      for (let i = lines.length - 1; i >= 0; i--) {
+        const line = lines[i]?.trim()
+        if (!line) continue
+        try {
+          const entry = JSON.parse(line)
+          if (userPromptText(entry) && entry.timestamp) return Date.parse(entry.timestamp)
+        } catch {
+          continue // partial first line of the tail
+        }
+      }
+      return undefined
+    }
+
+    let time: number | undefined
+    if (size > PROMPT_TIME_TAIL_BYTES) {
+      const fd = openSync(sessionFile, "r")
+      try {
+        const buf = Buffer.alloc(PROMPT_TIME_TAIL_BYTES)
+        readSync(fd, buf, 0, PROMPT_TIME_TAIL_BYTES, size - PROMPT_TIME_TAIL_BYTES)
+        time = lastPromptTime(buf.toString("utf-8"))
+      } finally {
+        closeSync(fd)
+      }
+    }
+    time ??= lastPromptTime(readFileSync(sessionFile, "utf-8"))
+
+    promptTimeCache.set(sessionFile, { mtimeMs, time })
+    return time
+  } catch {
+    return undefined
   }
 }
 

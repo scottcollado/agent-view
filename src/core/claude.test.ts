@@ -5,8 +5,10 @@ import os from "os"
 import {
   buildClaudeCommand,
   buildForkCommand,
+  claudeBinary,
   convertToClaudeDirName,
   getSessionFilePath,
+  getLastUserPromptTime,
   sessionFileExists,
   copySessionToProject,
   sessionHasConversationData,
@@ -14,6 +16,7 @@ import {
   type ForkCommandOptions
 } from "./claude"
 import type { ClaudeOptions } from "./types"
+import { getConfig } from "./config"
 
 // =============================================================================
 // buildClaudeCommand Tests
@@ -64,6 +67,43 @@ describe("buildClaudeCommand", () => {
 // =============================================================================
 // buildForkCommand Tests
 // =============================================================================
+
+// =============================================================================
+// API key sessions
+// =============================================================================
+
+describe("claudeBinary", () => {
+  afterEach(() => {
+    delete getConfig().claudeApiKeyCommand
+  })
+
+  test("returns plain claude when API key is not requested", () => {
+    getConfig().claudeApiKeyCommand = "echo key"
+    expect(claudeBinary()).toBe("claude")
+    expect(claudeBinary(false)).toBe("claude")
+  })
+
+  test("prefixes ANTHROPIC_API_KEY from the configured command", () => {
+    getConfig().claudeApiKeyCommand = "echo key"
+    expect(claudeBinary(true)).toBe(`ANTHROPIC_API_KEY="$(echo key)" claude`)
+  })
+
+  test("throws instead of silently falling back when no command is configured", () => {
+    expect(() => claudeBinary(true)).toThrow("claudeApiKeyCommand")
+  })
+
+  test("is applied by buildClaudeCommand and buildForkCommand", () => {
+    getConfig().claudeApiKeyCommand = "echo key"
+    expect(buildClaudeCommand({ sessionMode: "resume", useApiKey: true }))
+      .toBe(`ANTHROPIC_API_KEY="$(echo key)" claude --resume`)
+    expect(buildForkCommand({
+      projectPath: "/p",
+      parentSessionId: "parent",
+      newSessionId: "new",
+      useApiKey: true
+    })).toContain(`ANTHROPIC_API_KEY="$(echo key)" claude --session-id "new" --resume parent --fork-session`)
+  })
+})
 
 describe("buildForkCommand", () => {
   const defaultOptions: ForkCommandOptions = {
@@ -277,5 +317,46 @@ describe("findAnySessionID", () => {
   test("returns null for non-existent project path", () => {
     const result = findAnySessionID("/nonexistent/path/that/does/not/exist")
     expect(result).toBe(null)
+  })
+})
+
+// =============================================================================
+// getLastUserPromptTime Tests
+// =============================================================================
+
+describe("getLastUserPromptTime", () => {
+  // getClaudeConfigDir isn't injectable, so write under a unique fake project in ~/.claude
+  const projectPath = `/tmp/agent-view-test-${Date.now()}`
+  const sessionId = "prompt-time-session"
+  const sessionFile = getSessionFilePath(projectPath, sessionId)
+  const entry = (content: unknown, timestamp: string, type = "user") =>
+    JSON.stringify({ type, message: { role: type, content }, timestamp })
+
+  beforeEach(() => mkdirSync(path.dirname(sessionFile), { recursive: true }))
+  afterEach(() => rmSync(path.dirname(sessionFile), { recursive: true, force: true }))
+
+  test("returns the last typed prompt, skipping tool results, injected messages, and assistant turns", () => {
+    writeFileSync(sessionFile, [
+      entry("first prompt", "2026-10-29T01:00:00Z"),
+      entry([{ type: "text", text: "second prompt" }], "2026-10-29T02:00:00Z"),
+      entry([{ type: "tool_result", content: "ok" }], "2026-10-29T03:00:00Z"),
+      entry("<command-name>/clear</command-name>", "2026-10-29T04:00:00Z"),
+      entry("reply", "2026-10-29T05:00:00Z", "assistant")
+    ].join("\n"))
+
+    expect(getLastUserPromptTime(projectPath, sessionId)).toBe(Date.parse("2026-10-29T02:00:00Z"))
+  })
+
+  test("finds a prompt older than the read tail", () => {
+    const filler = entry([{ type: "tool_result", content: "x".repeat(1000) }], "2026-10-29T03:00:00Z")
+    writeFileSync(sessionFile, [entry("old prompt", "2026-10-29T01:00:00Z"), ...Array(400).fill(filler)].join("\n"))
+
+    expect(getLastUserPromptTime(projectPath, sessionId)).toBe(Date.parse("2026-10-29T01:00:00Z"))
+  })
+
+  test("skips transcripts not modified since the cutoff, and missing files", () => {
+    writeFileSync(sessionFile, entry("prompt", "2026-10-29T01:00:00Z"))
+    expect(getLastUserPromptTime(projectPath, sessionId, Date.now() + 60_000)).toBeUndefined()
+    expect(getLastUserPromptTime(projectPath, "missing")).toBeUndefined()
   })
 })

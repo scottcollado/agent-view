@@ -13,7 +13,7 @@ import { randomUUID } from "crypto"
 import path from "path"
 import fs from "fs"
 import os from "os"
-import { buildForkCommand, buildClaudeCommand, copySessionToProject, sessionFileExists } from "./claude"
+import { buildForkCommand, buildClaudeCommand, claudeBinary, copySessionToProject, sessionFileExists } from "./claude"
 import { getConfig, saveConfig } from "./config"
 import { addRecent } from "./recents"
 
@@ -295,6 +295,7 @@ export class SessionManager {
     const toolData: Record<string, unknown> = {}
     if (options.tool === "claude" && options.claudeOptions) {
       toolData.claudeSessionMode = options.claudeOptions.sessionMode
+      if (options.claudeOptions.useApiKey) toolData.claudeApiKey = true
     }
     if (claudeSessionId) {
       toolData.claudeSessionId = claudeSessionId
@@ -476,7 +477,8 @@ export class SessionManager {
     const forkCommand = buildForkCommand({
       projectPath,
       parentSessionId: parentClaudeSessionId,
-      newSessionId: newClaudeSessionId
+      newSessionId: newClaudeSessionId,
+      useApiKey: !!source.toolData?.claudeApiKey
     })
     log("Fork command:", forkCommand)
 
@@ -499,6 +501,7 @@ export class SessionManager {
     storage.updateSessionField(newSession.id, "tool_data", JSON.stringify({
       claudeSessionId: newClaudeSessionId,
       parentClaudeSessionId: parentClaudeSessionId,
+      ...(source.toolData?.claudeApiKey ? { claudeApiKey: true } : {}),
       claudeDetectedAt: Date.now()
     }))
 
@@ -557,7 +560,7 @@ export class SessionManager {
       : undefined
 
     const command = claudeSessionId
-      ? `claude --resume ${claudeSessionId}`
+      ? `${claudeBinary(!!session.toolData?.claudeApiKey)} --resume ${claudeSessionId}`
       : session.command
 
     const env: Record<string, string> = { AGENT_ORCHESTRATOR_SESSION: session.id }
@@ -600,7 +603,7 @@ export class SessionManager {
     const isClaudeSession = session.tool === "claude" && session.toolData?.claudeSessionId
     const newClaudeSessionId = isClaudeSession ? randomUUID() : undefined
     const command = isClaudeSession
-      ? `claude --session-id "${newClaudeSessionId}"`
+      ? `${claudeBinary(!!session.toolData?.claudeApiKey)} --session-id "${newClaudeSessionId}"`
       : session.command
 
     const env: Record<string, string> = { AGENT_ORCHESTRATOR_SESSION: session.id }

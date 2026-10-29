@@ -3,6 +3,18 @@
  */
 
 import type { Session, SessionStatus } from "@/core/types"
+import { getLastUserPromptTime } from "@/core/claude"
+
+/**
+ * Whether the user has interacted with a session since `since` (ms): its last
+ * typed Claude prompt, or for other tools its last attach/send/restart.
+ */
+export function isSessionActive(s: Session, since: number): boolean {
+  if (s.lastAccessed.getTime() >= since) return true
+  const claudeSessionId = s.toolData?.claudeSessionId
+  if (s.tool !== "claude" || typeof claudeSessionId !== "string") return false
+  return (getLastUserPromptTime(s.projectPath, claudeSessionId, since) ?? 0) >= since
+}
 
 /**
  * Sort priority for a session, combining status and acknowledged state.

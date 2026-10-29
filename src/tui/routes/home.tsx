@@ -3,7 +3,7 @@
  * Shows session list on left, preview pane on right
  */
 
-import { createMemo, createSignal, For, Show, createEffect, onCleanup, type Accessor } from "solid-js"
+import { createMemo, createSignal, For, Show, createEffect, onCleanup, untrack, type Accessor } from "solid-js"
 import { TextAttributes, ScrollBoxRenderable } from "@opentui/core"
 import { useTerminalDimensions, useKeyboard, useRenderer } from "@opentui/solid"
 import { useTheme } from "@tui/context/theme"
@@ -22,7 +22,7 @@ import { DialogRecents } from "@tui/component/dialog-recents"
 import { DialogSettings } from "@tui/component/dialog-settings"
 import { DialogNewRemote } from "@tui/component/dialog-new-remote"
 import { DialogHelp } from "@tui/component/dialog-help"
-import { getShortcuts } from "@/core/config"
+import { getConfig, getShortcuts } from "@/core/config"
 import { getLastUserPrompts } from "@/core/claude"
 import { executeShortcut, getShortcutGroupPath } from "@/core/shortcut"
 import { useKeybind } from "@tui/context/keybind"
@@ -34,13 +34,14 @@ import type { Session, Group, RemoteSession } from "@/core/types"
 import { isRemoteSession } from "@/core/types"
 import { formatRelativeTime, truncatePath } from "@tui/util/locale"
 import { STATUS_ICONS, UNVIEWED_ICON } from "@tui/util/status"
-import { sortSessionsByCreatedAt } from "@tui/util/session"
+import { sortSessionsByCreatedAt, isSessionActive } from "@tui/util/session"
 import { createListNavigation } from "@tui/util/navigation"
 import {
   flattenGroupTree,
   ensureDefaultGroup,
   getGroupSessionCount,
   getGroupStatusSummary,
+  isDynamicGroup,
   DEFAULT_GROUP_PATH,
   type GroupedItem
 } from "@tui/util/groups"
@@ -171,10 +172,34 @@ export function Home() {
   const remoteSessions = createMemo(() => sync.remote.list())
   const allSessions = createMemo(() => [...localSessions(), ...remoteSessions()])
 
+  // Activity is re-evaluated every minute, on detach, and when sessions come or go —
+  // not on every status refresh, since running sessions rewrite their transcripts constantly
+  const [now, setNow] = createSignal(Date.now())
+  const activityTick = setInterval(() => setNow(Date.now()), 60_000)
+  onCleanup(() => clearInterval(activityTick))
+
+  const [activeExpanded, setActiveExpanded] = createSignal(true)
+
+  const sessionIdsKey = createMemo(() => allSessions().map(s => s.id).join(","))
+
+  const activeIds = createMemo(() => {
+    sessionIdsKey()
+    const windowHours = getConfig().activeWindowHours ?? 0
+    if (windowHours <= 0) return undefined
+    const since = now() - windowHours * 3_600_000
+    return new Set(untrack(allSessions).filter(s => isSessionActive(s, since)).map(s => s.id))
+  })
+
   const groupedItems = createMemo(() => {
     const groups = ensureDefaultGroup(sync.group.list())
-    return flattenGroupTree(allSessions(), groups)
+    const ids = activeIds()
+    return flattenGroupTree(allSessions(), groups, ids && { activeIds: ids, activeExpanded: activeExpanded() })
   })
+
+  function toggleGroup(path: string) {
+    if (isDynamicGroup(path)) setActiveExpanded(!activeExpanded())
+    else sync.group.toggle(path)
+  }
 
   createEffect(() => {
     const len = groupedItems().length
@@ -288,6 +313,11 @@ export function Home() {
   }
 
   async function handleDeleteGroup(group: Group) {
+    if (isDynamicGroup(group.path)) {
+      toast.show({ message: `"${group.name}" is automatic and can't be deleted`, variant: "error", duration: 2000 })
+      return
+    }
+
     const sessionCount = getGroupSessionCount(allSessions(), group.path)
 
     // Don't allow deleting default group
@@ -328,6 +358,7 @@ export function Home() {
       console.error("Attach error:", err)
     }
     renderer.resume()
+    setNow(Date.now())
     sync.refresh()
 
     if (isRemoteSession(session)) {
@@ -615,7 +646,7 @@ export function Home() {
     if (evt.name === "right" || evt.name === "l") {
       const item = selectedItem()
       if (item?.type === "group" && item.group && !item.group.expanded) {
-        sync.group.toggle(item.group.path)
+        toggleGroup(item.group.path)
       } else if (item?.type === "session" && item.session) {
         handleAttach(item.session)
       }
@@ -625,14 +656,14 @@ export function Home() {
     if (evt.name === "left" || evt.name === "h") {
       const item = selectedItem()
       if (item?.type === "group" && item.group && item.group.expanded) {
-        sync.group.toggle(item.group.path)
+        toggleGroup(item.group.path)
       } else if (item?.type === "session") {
         // When on a session, collapse its parent group
         const groupItem = groupedItems().find(
           i => i.type === "group" && i.groupPath === item.groupPath
         )
         if (groupItem?.group?.expanded) {
-          sync.group.toggle(groupItem.group.path)
+          toggleGroup(groupItem.group.path)
         }
       }
     }
@@ -643,7 +674,7 @@ export function Home() {
       if (item?.type === "session" && item.session) {
         handleAttach(item.session)
       } else if (item?.type === "group" && item.group) {
-        sync.group.toggle(item.group.path)
+        toggleGroup(item.group.path)
       }
     }
 
@@ -704,6 +735,10 @@ export function Home() {
         }
         dialog.push(() => <DialogRename session={item.session!} />)
       } else if (item?.type === "group" && item.group) {
+        if (isDynamicGroup(item.group.path)) {
+          toast.show({ message: `"${item.group.name}" is automatic and can't be renamed`, variant: "error", duration: 2000 })
+          return
+        }
         dialog.push(() => <DialogGroup mode="rename" group={item.group!} />)
       }
     }
@@ -849,9 +884,12 @@ export function Home() {
     return lines
   })
 
-  function GroupHeader(props: { group: Group; index: number }) {
+  function GroupHeader(props: { group: Group; index: number; members?: Session[] }) {
     const isSelected = createMemo(() => props.index === selectedIndex())
-    const statusSummary = createMemo(() => getGroupStatusSummary(allSessions(), props.group.path))
+    // Sessions pulled into Active are counted there, not in their home group
+    const statusSummary = createMemo(() => props.members
+      ? getGroupStatusSummary(props.members)
+      : getGroupStatusSummary(allSessions().filter(s => !activeIds()?.has(s.id)), props.group.path))
 
     return (
       <box
@@ -898,6 +936,7 @@ export function Home() {
     const isSelected = createMemo(() => props.index === selectedIndex())
     const isRemote = createMemo(() => isRemoteSession(props.session))
     const isUnviewed = createMemo(() => !props.session.acknowledged && props.session.status === "idle")
+    const isApiKey = createMemo(() => !!props.session.toolData?.claudeApiKey)
     const statusColor = createMemo(() => {
       if (props.session.status === "waiting") return theme.error
       if (isUnviewed()) return theme.info
@@ -921,6 +960,9 @@ export function Home() {
       reserved += 6 // memory indicator (e.g., "512M ")
       if (!useDualColumn()) {
         reserved += 8 // tool name + space in single column mode
+      }
+      if (isApiKey()) {
+        reserved += 6 // " [API]"
       }
       // Reserve space for remote indicator
       if (isRemote()) {
@@ -963,6 +1005,16 @@ export function Home() {
         >
           {title()}
         </text>
+
+        {/* API key indicator */}
+        <Show when={isApiKey()}>
+          <text
+            fg={isSelected() ? theme.selectedListItemText : theme.warning}
+            attributes={TextAttributes.BOLD}
+          >
+            {" [API]"}
+          </text>
+        </Show>
 
         {/* Remote indicator */}
         <Show when={isRemote()}>
@@ -1046,6 +1098,9 @@ export function Home() {
             {/* Time and tool info */}
             <box flexDirection="row" gap={2} height={1}>
               <text fg={theme.accent}>{s().tool}</text>
+              <Show when={s().toolData?.claudeApiKey}>
+                <text fg={theme.warning} attributes={TextAttributes.BOLD}>API key</text>
+              </Show>
               <text fg={theme.textMuted}>{formatRelativeTime(s().lastAccessed)}</text>
               <Show when={s().worktreeBranch}>
                 <text fg={theme.info}>{s().worktreeBranch}</text>
@@ -1182,7 +1237,7 @@ export function Home() {
                       />
                     }
                   >
-                    <GroupHeader group={item.group!} index={index()} />
+                    <GroupHeader group={item.group!} index={index()} members={item.members} />
                   </Show>
                 )}
               </For>

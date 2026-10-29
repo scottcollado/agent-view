@@ -61,7 +61,7 @@ const TOOLS: { value: Tool; label: string; description: string }[] = [
   { value: "shell", label: "Shell", description: "Plain terminal session" }
 ]
 
-type FocusField = "title" | "tool" | "resumeSession" | "skipPermissions" | "customCommand" | "path" | "worktree" | "branch"
+type FocusField = "title" | "tool" | "resumeSession" | "skipPermissions" | "apiKey" | "customCommand" | "path" | "worktree" | "branch"
 
 export function DialogNew() {
   const dialog = useDialog()
@@ -97,6 +97,8 @@ export function DialogNew() {
 
   const [claudeSessionMode, setClaudeSessionMode] = createSignal<ClaudeSessionMode>("new")
   const [skipPermissions, setSkipPermissions] = createSignal(false)
+  const [useApiKey, setUseApiKey] = createSignal(false)
+  const apiKeyAvailable = !!config().claudeApiKeyCommand
 
   const [useWorktree, setUseWorktree] = createSignal(false)
   const [worktreeBranch, setWorktreeBranch] = createSignal("")
@@ -177,6 +179,7 @@ export function DialogNew() {
     const fields: FocusField[] = ["title", "tool"]
     if (selectedTool() === "claude") {
       fields.push("resumeSession")
+      if (apiKeyAvailable) fields.push("apiKey")
       // skipPermissions removed in fork (security risk with MCP access)
     }
     if (selectedTool() === "custom") {
@@ -253,7 +256,8 @@ export function DialogNew() {
 
       const claudeOptions = selectedTool() === "claude" ? {
         sessionMode: claudeSessionMode(),
-        skipPermissions: skipPermissions()
+        skipPermissions: skipPermissions(),
+        useApiKey: useApiKey()
       } : undefined
 
       const session = await sync.session.create({
@@ -375,6 +379,12 @@ export function DialogNew() {
       return
     }
 
+    if (focusedField() === "apiKey" && evt.name === "space") {
+      evt.preventDefault()
+      setUseApiKey(!useApiKey())
+      return
+    }
+
     if (focusedField() === "skipPermissions" && evt.name === "space") {
       evt.preventDefault()
       setSkipPermissions(!skipPermissions())
@@ -466,6 +476,23 @@ export function DialogNew() {
               Resume
             </text>
           </box>
+          <Show when={apiKeyAvailable}>
+            <box
+              flexDirection="row"
+              gap={1}
+              onMouseUp={() => {
+                setFocusedField("apiKey")
+                setUseApiKey(!useApiKey())
+              }}
+            >
+              <text fg={focusedField() === "apiKey" ? theme.primary : theme.textMuted}>
+                {useApiKey() ? "[x]" : "[ ]"}
+              </text>
+              <text fg={focusedField() === "apiKey" ? theme.text : theme.textMuted}>
+                API key
+              </text>
+            </box>
+          </Show>
           {/* skipPermissions checkbox removed in fork (security risk with MCP access) */}
         </box>
       </Show>

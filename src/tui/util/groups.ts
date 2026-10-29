@@ -12,10 +12,27 @@ export interface GroupedItem {
   groupPath: string
   isLast: boolean
   groupIndex?: number  // 1-9 for hotkey jumps
+  members?: Session[]  // Dynamic groups only: sessions computed into the group
 }
 
 export const DEFAULT_GROUP_PATH = "my-sessions"
 export const DEFAULT_GROUP_NAME = "My Sessions"
+
+// Dynamic groups: membership is computed from recent activity, not stored.
+// Active pulls recently-prompted sessions out of every group; the default group
+// is shown as Passive, holding the ungrouped sessions that have gone quiet.
+export const ACTIVE_GROUP_PATH = "@active"
+export const ACTIVE_GROUP_NAME = "Active"
+export const PASSIVE_GROUP_NAME = "Passive"
+
+export interface ActivityGrouping {
+  activeIds: Set<string>
+  activeExpanded: boolean
+}
+
+export function isDynamicGroup(path: string): boolean {
+  return path === ACTIVE_GROUP_PATH
+}
 
 export function ensureDefaultGroup(groups: Group[]): Group[] {
   const hasDefault = groups.some(g => g.path === DEFAULT_GROUP_PATH)
@@ -44,7 +61,7 @@ function needsAttention(s: Session): boolean {
   return s.status === "waiting" || (!s.acknowledged && s.status === "idle")
 }
 
-export function flattenGroupTree(sessions: Session[], groups: Group[]): GroupedItem[] {
+export function flattenGroupTree(sessions: Session[], groups: Group[], activity?: ActivityGrouping): GroupedItem[] {
   const result: GroupedItem[] = []
 
   // Pull out sessions that need attention — they go at the very top, ungrouped
@@ -70,13 +87,44 @@ export function flattenGroupTree(sessions: Session[], groups: Group[]): GroupedI
     }
   }
 
-  // Sort groups by order
-  const sortedGroups = [...groups].sort((a, b) => a.order - b.order)
+  // Active group: recently-prompted sessions from any group
+  let groupIndex = 1
+  const activeIds = new Set<string>()
+  if (activity) {
+    const members = sortSessionsByCreatedAt(
+      sessions.filter(s => activity.activeIds.has(s.id) && !attentionIds.has(s.id))
+    )
+    for (const s of members) activeIds.add(s.id)
+
+    result.push({
+      type: "group",
+      group: { path: ACTIVE_GROUP_PATH, name: ACTIVE_GROUP_NAME, expanded: activity.activeExpanded, order: -1, defaultPath: "" },
+      groupPath: ACTIVE_GROUP_PATH,
+      isLast: false,
+      groupIndex: groupIndex++,
+      members
+    })
+    if (activity.activeExpanded) {
+      for (let i = 0; i < members.length; i++) {
+        result.push({
+          type: "session",
+          session: members[i],
+          groupPath: ACTIVE_GROUP_PATH,
+          isLast: i === members.length - 1
+        })
+      }
+    }
+  }
+
+  // Sort groups by order; with activity grouping the default group reads as Passive
+  const sortedGroups = [...groups]
+    .sort((a, b) => a.order - b.order)
+    .map(g => activity && g.path === DEFAULT_GROUP_PATH ? { ...g, name: PASSIVE_GROUP_NAME } : g)
 
   // Create a map of groupPath -> sessions (excluding attention sessions)
   const sessionsByGroup = new Map<string, Session[]>()
   for (const session of sessions) {
-    if (attentionIds.has(session.id)) continue
+    if (attentionIds.has(session.id) || activeIds.has(session.id)) continue
     const groupPath = session.groupPath || DEFAULT_GROUP_PATH
     const existing = sessionsByGroup.get(groupPath) || []
     existing.push(session)
@@ -89,7 +137,6 @@ export function flattenGroupTree(sessions: Session[], groups: Group[]): GroupedI
   }
 
   // Build grouped list
-  let groupIndex = 1
   for (const group of sortedGroups) {
     const groupSessions = sessionsByGroup.get(group.path) || []
 
@@ -154,12 +201,14 @@ export function getGroupSessionCount(sessions: Session[], groupPath: string): nu
   return sessions.filter(s => (s.groupPath || DEFAULT_GROUP_PATH) === groupPath).length
 }
 
-export function getGroupStatusSummary(sessions: Session[], groupPath: string): {
+export function getGroupStatusSummary(sessions: Session[], groupPath?: string): {
   running: number
   waiting: number
   error: number
 } {
-  const groupSessions = sessions.filter(s => (s.groupPath || DEFAULT_GROUP_PATH) === groupPath)
+  const groupSessions = groupPath === undefined
+    ? sessions
+    : sessions.filter(s => (s.groupPath || DEFAULT_GROUP_PATH) === groupPath)
   return {
     running: groupSessions.filter(s => s.status === "running").length,
     waiting: groupSessions.filter(s => s.status === "waiting").length,

@@ -6,7 +6,9 @@ import {
   getGroupStatusSummary,
   generateGroupPath,
   DEFAULT_GROUP_PATH,
-  DEFAULT_GROUP_NAME
+  DEFAULT_GROUP_NAME,
+  ACTIVE_GROUP_PATH,
+  PASSIVE_GROUP_NAME
 } from "./groups"
 import type { Session, Group } from "@/core/types"
 
@@ -123,6 +125,51 @@ describe("flattenGroupTree", () => {
     expect(result[0]!.groupIndex).toBe(1)
     expect(result[8]!.groupIndex).toBe(9)
     expect(result[9]!.groupIndex).toBeUndefined()
+  })
+})
+
+describe("flattenGroupTree with activity grouping", () => {
+  const groups = [
+    createMockGroup({ path: DEFAULT_GROUP_PATH, name: DEFAULT_GROUP_NAME, order: 0 }),
+    createMockGroup({ path: "dev", name: "dev", order: 1 })
+  ]
+  const sessions = [
+    createMockSession({ id: "active-default", acknowledged: true }),
+    createMockSession({ id: "quiet-default", acknowledged: true }),
+    createMockSession({ id: "active-dev", groupPath: "dev", acknowledged: true }),
+    createMockSession({ id: "quiet-dev", groupPath: "dev", acknowledged: true }),
+    createMockSession({ id: "waiting", status: "waiting", acknowledged: true })
+  ]
+  const activeIds = new Set(["active-default", "active-dev", "waiting"])
+  const layout = (items: ReturnType<typeof flattenGroupTree>) =>
+    items.map(i => i.type === "group" ? `[${i.group!.name}]` : i.session!.id)
+
+  test("pulls active sessions from every group into Active; default group reads as Passive", () => {
+    const result = flattenGroupTree(sessions, groups, { activeIds, activeExpanded: true })
+
+    expect(layout(result)).toEqual([
+      "waiting", // attention sessions still float to the top, ungrouped
+      "[Active]", "active-default", "active-dev",
+      `[${PASSIVE_GROUP_NAME}]`, "quiet-default",
+      "[dev]", "quiet-dev"
+    ])
+    expect(result.find(i => i.groupPath === ACTIVE_GROUP_PATH)!.members!.map(s => s.id))
+      .toEqual(["active-default", "active-dev"])
+    expect(result[1]!.groupIndex).toBe(1)
+  })
+
+  test("collapsed Active hides its sessions but keeps the header", () => {
+    const result = flattenGroupTree(sessions, groups, { activeIds, activeExpanded: false })
+    expect(layout(result).slice(0, 3)).toEqual(["waiting", "[Active]", `[${PASSIVE_GROUP_NAME}]`])
+  })
+
+  test("without activity grouping the layout is unchanged", () => {
+    const result = flattenGroupTree(sessions, groups)
+    expect(layout(result)).toEqual([
+      "waiting",
+      `[${DEFAULT_GROUP_NAME}]`, "active-default", "quiet-default",
+      "[dev]", "active-dev", "quiet-dev"
+    ])
   })
 })
 

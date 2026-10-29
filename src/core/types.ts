@@ -80,6 +80,7 @@ export type ClaudeSessionMode = "new" | "resume"
 export interface ClaudeOptions {
   sessionMode: ClaudeSessionMode
   skipPermissions?: boolean
+  useApiKey?: boolean             // Launch with ANTHROPIC_API_KEY from config.claudeApiKeyCommand
 }
 
 export interface SessionCreateOptions {

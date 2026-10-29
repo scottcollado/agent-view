@@ -30,6 +30,8 @@ export interface AppConfig {
   autoHibernateMinutes?: number   // 0 = disabled, default 0
   autoHibernatePrompted?: boolean // true = user has seen the prompt
   lastRemoteSession?: LastRemoteSession   // Last used remote session values
+  activeWindowHours?: number      // Sessions prompted within this window show in the "Active" group; 0 = disabled, default 8
+  claudeApiKeyCommand?: string    // Shell command that prints an Anthropic API key; enables "API key" Claude sessions
 }
 
 const CONFIG_DIR = path.join(os.homedir(), ".agent-view")
@@ -43,6 +45,7 @@ const DEFAULT_CONFIG: AppConfig = {
     autoCleanup: true
   },
   defaultGroup: "default",
+  activeWindowHours: 8,
   shortcuts: [],
   recents: []
 }

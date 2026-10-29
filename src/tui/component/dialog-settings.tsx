@@ -28,6 +28,18 @@ const HIBERNATE_OPTIONS = [
   { title: "4 hours", value: 240 },
 ]
 
+const ACTIVE_WINDOW_OPTIONS = [
+  { title: "Disabled", value: 0 },
+  { title: "2 hours", value: 2 },
+  { title: "4 hours", value: 4 },
+  { title: "8 hours", value: 8 },
+  { title: "24 hours", value: 24 },
+]
+
+function formatActiveWindow(hours: number): string {
+  return hours ? `${hours}h` : "Disabled"
+}
+
 function formatHibernate(minutes: number): string {
   if (!minutes) return "Disabled"
   if (minutes < 60) return `${minutes}m`
@@ -64,6 +76,11 @@ export function DialogSettings() {
         value: "autoHibernate" as const,
         footer: formatHibernate(config.autoHibernateMinutes || 0),
       },
+      {
+        title: "Active group window",
+        value: "activeWindow" as const,
+        footer: formatActiveWindow(config.activeWindowHours ?? 0),
+      },
     ]
 
     dialog.replace(() => (
@@ -77,6 +94,7 @@ export function DialogSettings() {
             case "theme": return showTheme()
             case "defaultGroup": return showDefaultGroup()
             case "autoHibernate": return showAutoHibernate()
+            case "activeWindow": return showActiveWindow()
           }
         }}
       />
@@ -158,6 +176,19 @@ export function DialogSettings() {
         current={config.autoHibernateMinutes || 0}
         skipFilter
         onSelect={(opt) => updateConfig((c) => ({ ...c, autoHibernateMinutes: opt.value, autoHibernatePrompted: true }))}
+      />
+    ))
+  }
+
+  function showActiveWindow() {
+    const config = getConfig()
+    dialog.replace(() => (
+      <DialogSelect
+        title="Active group window"
+        options={ACTIVE_WINDOW_OPTIONS}
+        current={config.activeWindowHours ?? 0}
+        skipFilter
+        onSelect={(opt) => updateConfig((c) => ({ ...c, activeWindowHours: opt.value }))}
       />
     ))
   }
